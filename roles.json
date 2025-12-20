@@ -1,0 +1,14 @@
+[
+  {
+    "name": "superadmin",
+    "auth_type": "cookie",
+    "auth_value": "PHPSESSID=8soi3hf8j4gddke73eu854p25s",
+    "cookie": "PHPSESSID=8soi3hf8j4gddke73eu854p25s"
+  },
+  {
+    "name": "guest",
+    "auth_type": "cookie",
+    "auth_value": "PHPSESSID=pi95u8tbjfi1em5j3o4bt622fa",
+    "cookie": "PHPSESSID=pi95u8tbjfi1em5j3o4bt622fa"
+  }
+]
