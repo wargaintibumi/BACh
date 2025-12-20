@@ -1,19 +1,6 @@
 # BACh
-## Broken Acccess Control Checker
-
 **Multi-role Access Control Testing with Matrix Output**
 
-Version 2.0 introduces a completely new approach to BAC testing with multi-role support, matrix output, and automatic Excel generation.
-
-## 🆕 What's New in v2.0
-
-### Key Differences from v1.0:
-- **Multi-role testing** - Test all URLs with all roles in one run
-- **Matrix output** - Excel format (paths × roles) for easy analysis
-- **Role management** - Configure multiple roles in Burp extension
-- **Auto Excel generation** - Automatic color-coded spreadsheet
-- **Redirect tracking** - Orange color for redirected requests
-- **No automatic BAC detection** - Just report facts, manual analysis
 
 ### Architecture:
 ```
@@ -363,4 +350,5 @@ This tool is for authorized security testing only. Only use on applications you 
 **Version**: 2.0.0
 **Author**: Security Researcher
 **Last Updated**: 2025-12-10
+
 
