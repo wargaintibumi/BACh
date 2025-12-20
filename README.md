@@ -1,5 +1,6 @@
 # BACh
-**Multi-role Access Control Testing with Matrix Output**
+**Broken Access Control Checker
+***Multi-role Access Control Testing with Matrix Output**
 
 
 ### Architecture:
@@ -350,5 +351,6 @@ This tool is for authorized security testing only. Only use on applications you 
 **Version**: 2.0.0
 **Author**: Security Researcher
 **Last Updated**: 2025-12-10
+
 
 
