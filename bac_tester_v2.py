@@ -14,7 +14,8 @@ from datetime import datetime
 from pathlib import Path
 
 
-def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_value=None, header_name=None, timeout=10):
+def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_value=None, header_name=None,
+                       method='GET', body=None, content_type=None, timeout=10):
     """
     Test a single URL with a specific role's authentication.
 
@@ -25,11 +26,15 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
         auth_type: Type of authentication ('cookie', 'token', or 'header')
         auth_value: Authentication value (cookie string, Bearer token, or custom header value)
         header_name: Custom header name (only used when auth_type='header')
+        method: HTTP method ('GET' or 'POST')
+        body: Request body (for POST requests)
+        content_type: Content-Type header (for POST requests)
         timeout: Request timeout in seconds
 
     Returns:
         dict: {
             'url': str,
+            'method': str,
             'role': str,
             'status_code': str,
             'redirected': bool,
@@ -43,6 +48,8 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
             auth_value = cookie
             auth_type = 'cookie'
 
+        method = method.upper() if method else 'GET'
+
         # Build curl command with browser-like headers
         cmd = [
             'curl.exe',
@@ -53,6 +60,18 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
             '-L',  # Follow redirects
             '-k',  # Allow insecure SSL
         ]
+
+        # Set HTTP method for non-GET requests
+        if method != 'GET':
+            cmd.extend(['-X', method])
+
+        # Add POST body if present
+        if body:
+            cmd.extend(['-d', body])
+
+        # Add Content-Type for POST requests
+        if content_type:
+            cmd.extend(['-H', f'Content-Type: {content_type}'])
 
         # Add authentication header based on type
         if auth_type == 'header' and header_name:
@@ -98,6 +117,7 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
 
             return {
                 'url': url,
+                'method': method,
                 'role': role_name,
                 'status_code': status_code,
                 'redirected': redirected,
@@ -107,6 +127,7 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
         else:
             return {
                 'url': url,
+                'method': method,
                 'role': role_name,
                 'status_code': '000',
                 'redirected': False,
@@ -117,6 +138,7 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
     except subprocess.TimeoutExpired:
         return {
             'url': url,
+            'method': method,
             'role': role_name,
             'status_code': '000',
             'redirected': False,
@@ -126,6 +148,7 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
     except Exception as e:
         return {
             'url': url,
+            'method': method,
             'role': role_name,
             'status_code': '000',
             'redirected': False,
@@ -139,35 +162,34 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
     Test all URLs with all roles, creating a matrix of results.
 
     Args:
-        urls: List of URLs to test
+        urls: List of URL objects [{'url': '...', 'method': 'GET'}, ...] or plain strings
         roles: List of role dicts [{'name': 'admin', 'cookie': 'PHPSESSID=...'}, ...]
         progress_callback: Optional callback(current, total, url, role) for progress updates
         stop_callback: Optional callback() returning True if testing should stop
 
     Returns:
-        dict: {
-            'test_date': str (ISO format),
-            'urls': list of URLs,
-            'roles': list of role names,
-            'results': {
-                '/path1': {'role1': '200', 'role2': '403', ...},
-                '/path2': {'role1': '200', 'role2': '200', ...}
-            },
-            'details': {
-                '/path1': {
-                    'role1': {'status': '200', 'redirected': False, 'final_url': '...'},
-                    'role2': {'status': '403', 'redirected': False, 'final_url': '...'}
-                }
-            }
-        }
+        dict with results matrix keyed by 'METHOD url'
     """
+
+    # Normalize URLs: support both plain strings and objects
+    url_entries = []
+    for u in urls:
+        if isinstance(u, str):
+            url_entries.append({'url': u, 'method': 'GET', 'body': None, 'content_type': None})
+        else:
+            url_entries.append({
+                'url': u.get('url', u) if isinstance(u, dict) else str(u),
+                'method': u.get('method', 'GET').upper() if isinstance(u, dict) else 'GET',
+                'body': u.get('body') if isinstance(u, dict) else None,
+                'content_type': u.get('content_type') if isinstance(u, dict) else None,
+            })
 
     print("="*70)
     print("BAC Checker v2.0 - Multi-Role Testing")
     print("="*70)
-    print(f"URLs to test: {len(urls)}")
+    print(f"URLs to test: {len(url_entries)}")
     print(f"Roles: {', '.join([r['name'] for r in roles])}")
-    print(f"Total requests: {len(urls)} × {len(roles)} = {len(urls) * len(roles)}")
+    print(f"Total requests: {len(url_entries)} × {len(roles)} = {len(url_entries) * len(roles)}")
     print("="*70)
 
     # Initialize results structure
@@ -175,14 +197,21 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
     details = {}
     role_names = [role['name'] for role in roles]
 
-    total_tests = len(urls) * len(roles)
+    total_tests = len(url_entries) * len(roles)
     current_test = 0
     stopped = False
 
     # Test each URL with each role
-    for url in urls:
-        results[url] = {}
-        details[url] = {}
+    for entry in url_entries:
+        url = entry['url']
+        http_method = entry['method']
+        body = entry.get('body')
+        content_type = entry.get('content_type')
+
+        # Use "METHOD url" as key to distinguish GET vs POST for same URL
+        result_key = f"{http_method} {url}"
+        results[result_key] = {}
+        details[result_key] = {}
 
         for role in roles:
             # Check if testing should stop
@@ -197,10 +226,9 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
             if progress_callback:
                 progress_callback(current_test, total_tests, url, role['name'])
 
-            print(f"[{current_test}/{total_tests}] Testing {url} as {role['name']}", end=' ', flush=True)
+            print(f"[{current_test}/{total_tests}] {http_method} {url} as {role['name']}", end=' ', flush=True)
 
             # Test the URL with this role
-            # Support old format (cookie), new format (auth_type + auth_value), and custom header
             auth_type = role.get('auth_type', 'cookie')
             auth_value = role.get('auth_value', role.get('cookie', ''))
             header_name = role.get('header_name', '')
@@ -210,18 +238,20 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
                 auth_type=auth_type,
                 auth_value=auth_value,
                 header_name=header_name,
+                method=http_method,
+                body=body,
+                content_type=content_type,
                 timeout=10
             )
 
             # Store status code in results matrix
             if result['redirected']:
-                # Mark as redirect even if final status is 200
-                results[url][role['name']] = f"{result['status_code']} →"
+                results[result_key][role['name']] = f"{result['status_code']} →"
             else:
-                results[url][role['name']] = result['status_code']
+                results[result_key][role['name']] = result['status_code']
 
             # Store detailed information
-            details[url][role['name']] = {
+            details[result_key][role['name']] = {
                 'status': result['status_code'],
                 'redirected': result['redirected'],
                 'final_url': result['final_url'],
@@ -256,7 +286,7 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
         'results': results,
         'details': details,
         'stopped': stopped,
-        'total_urls': len(urls),
+        'total_urls': len(url_entries),
         'tested_urls': len(results),
         'total_roles': len(roles)
     }

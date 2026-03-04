@@ -54,12 +54,15 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             self.auto_capture = False
 
             # Data storage
-            self.captured_urls = set()
+            self.captured_urls = {}  # key: "METHOD url" -> {url, method, body, content_type}
             self.roles = []  # List of {name: str, cookie: str}
             self.exclusion_patterns = []  # List of regex patterns
 
             # Auto-polling timer for test status
             self.status_poll_timer = None
+            self._last_logged_progress = -1  # Track last logged progress to avoid spam
+            self._test_completed_logged = False  # Track if completion was already logged
+            self._poll_error_count = 0  # Track consecutive polling errors
 
             # Register listeners
             callbacks.registerContextMenuFactory(self)
@@ -89,12 +92,19 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             role_tab = self.createRoleManagementTab()
             self._main_panel.addTab("Role Management", role_tab)
 
-            # Auth type combo listener to toggle header name field
+            # Auth type combo listener to toggle header name field and update label
             def onAuthTypeChanged(event):
                 selected = str(self._auth_type_combo.getSelectedItem())
                 self._header_name_field.setEnabled(selected == "Custom Header")
                 if selected != "Custom Header":
                     self._header_name_field.setText("")
+                # Update value label based on auth type
+                if selected == "Cookie":
+                    self._auth_value_label.setText("Cookie:")
+                elif selected == "Bearer Token":
+                    self._auth_value_label.setText("Token:")
+                else:
+                    self._auth_value_label.setText("Header Value:")
 
             self._auth_type_combo.addActionListener(onAuthTypeChanged)
 
@@ -150,7 +160,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
         form_panel.add(self._header_name_field, gbc)
 
         gbc.gridx = 0; gbc.gridy = 3
-        self._auth_value_label = JLabel("Value:")
+        self._auth_value_label = JLabel("Cookie:")
         form_panel.add(self._auth_value_label, gbc)
         gbc.gridx = 1
         self._role_cookie_field = JTextField(30)
@@ -323,26 +333,50 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
     def createTestTab(self):
         panel = JPanel(BorderLayout())
 
-        # Top panel - Test controls
-        controls_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        # Top panel - Test controls (two rows)
+        top_panel = JPanel(GridBagLayout())
+        tgbc = GridBagConstraints()
+        tgbc.insets = Insets(3, 5, 3, 5)
+        tgbc.anchor = GridBagConstraints.WEST
 
+        # Row 1: API connection settings
+        tgbc.gridx = 0; tgbc.gridy = 0
+        top_panel.add(JLabel("API Host:"), tgbc)
+        tgbc.gridx = 1
+        self._api_host_field = JTextField(self.api_host, 10)
+        top_panel.add(self._api_host_field, tgbc)
+        tgbc.gridx = 2
+        top_panel.add(JLabel("Port:"), tgbc)
+        tgbc.gridx = 3
+        self._api_port_field = JTextField(self.api_port, 5)
+        top_panel.add(self._api_port_field, tgbc)
+        tgbc.gridx = 4
+        apply_api_btn = JButton("Apply", actionPerformed=self.applyAPIConfig)
+        top_panel.add(apply_api_btn, tgbc)
+
+        # Row 2: Test controls
+        tgbc.gridx = 0; tgbc.gridy = 1
         start_test_btn = JButton("Run BAC Test", actionPerformed=self.startTest)
         start_test_btn.setPreferredSize(Dimension(150, 30))
-        controls_panel.add(start_test_btn)
+        top_panel.add(start_test_btn, tgbc)
 
+        tgbc.gridx = 1
         stop_test_btn = JButton("Stop Test", actionPerformed=self.stopTest)
-        controls_panel.add(stop_test_btn)
+        top_panel.add(stop_test_btn, tgbc)
 
+        tgbc.gridx = 2
         status_btn = JButton("Check Status", actionPerformed=self.checkTestStatus)
-        controls_panel.add(status_btn)
+        top_panel.add(status_btn, tgbc)
 
+        tgbc.gridx = 3
         open_excel_btn = JButton("Open Excel", actionPerformed=self.openExcelFile)
-        controls_panel.add(open_excel_btn)
+        top_panel.add(open_excel_btn, tgbc)
 
+        tgbc.gridx = 4
         self._test_status_label = JLabel("Status: Ready")
-        controls_panel.add(self._test_status_label)
+        top_panel.add(self._test_status_label, tgbc)
 
-        panel.add(controls_panel, BorderLayout.NORTH)
+        panel.add(top_panel, BorderLayout.NORTH)
 
         # Center panel - Info
         info_panel = JPanel(GridBagLayout())
@@ -745,23 +779,50 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             return False
 
     def addURLFromMessage(self, message):
-        """Extract and add URL from HTTP message"""
+        """Extract and add URL, method, and body from HTTP message"""
         try:
             request_info = self._helpers.analyzeRequest(message)
             url = str(request_info.getUrl())
-            method = request_info.getMethod()
+            method = str(request_info.getMethod()).upper()
 
             # Check if URL is excluded
             if self.isURLExcluded(url):
                 return
 
-            if url in self.captured_urls:
+            # Dedup key: "METHOD url"
+            dedup_key = "{} {}".format(method, url)
+            if dedup_key in self.captured_urls:
                 return
 
-            self.captured_urls.add(url)
+            # Extract POST body and content type
+            body = None
+            content_type = None
+            if method == "POST":
+                try:
+                    request_bytes = message.getRequest()
+                    body_offset = request_info.getBodyOffset()
+                    if body_offset < len(request_bytes):
+                        body = self._helpers.bytesToString(request_bytes[body_offset:])
+                        if not body.strip():
+                            body = None
+                except:
+                    pass
+
+                # Extract Content-Type header
+                for header in request_info.getHeaders():
+                    if header.lower().startswith("content-type:"):
+                        content_type = header[13:].strip()
+                        break
+
+            # Store URL object
+            self.captured_urls[dedup_key] = {
+                "url": url,
+                "method": method,
+                "body": body,
+                "content_type": content_type
+            }
 
             row_num = len(self.captured_urls)
-            timestamp = time.strftime("%H:%M:%S")
 
             status = "-"
             try:
@@ -772,8 +833,16 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             except:
                 pass
 
-            self._url_model.addRow([str(row_num), method, url, status])
-            self._url_stats_label.setText("Captured: {}".format(len(self.captured_urls)))
+            # UI updates must run on Swing EDT (this method is called from Burp's HTTP thread)
+            _row_num = str(row_num)
+            _method = method
+            _url = url
+            _status = status
+            _count = len(self.captured_urls)
+            def updateTableUI():
+                self._url_model.addRow([_row_num, _method, _url, _status])
+                self._url_stats_label.setText("Captured: {}".format(_count))
+            SwingUtilities.invokeLater(updateTableUI)
 
         except Exception as e:
             self.log_url("[ERROR] Error adding URL: {}".format(str(e)))
@@ -789,7 +858,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
     def clearLocalTable(self, event):
         """Clear captured URLs from table only (does NOT clear API)"""
         try:
-            self.captured_urls.clear()
+            self.captured_urls = {}
             self._url_model.setRowCount(0)
             self._url_stats_label.setText("Captured: 0")
             self.log_url("[OK] Table cleared (API URLs unchanged)")
@@ -829,14 +898,14 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             self.log_url("[ERROR] Delete URLs failed: {}".format(str(e)))
 
     def sendURLsToAPI(self, event):
-        """Send URLs to API"""
+        """Send URLs to API (with method and body)"""
         try:
             if not self.captured_urls:
                 self.log_url("[ERROR] No URLs to send")
                 return
 
             url = "http://{}:{}/api/urls/add".format(self.api_host, self.api_port)
-            data = {"urls": list(self.captured_urls), "append": True}
+            data = {"urls": list(self.captured_urls.values()), "append": True}
 
             req = urllib2.Request(url)
             req.add_header('Content-Type', 'application/json')
@@ -933,9 +1002,12 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 self.log_test("   Total tests: {}".format(result.get('total_tests', 0)))
                 self._test_status_label.setText("Status: Running...")
 
-                # Reset progress bar
+                # Reset progress bar and tracking state
                 self._progress_bar.setValue(0)
                 self._progress_label.setText("0%")
+                self._last_logged_progress = -1
+                self._test_completed_logged = False
+                self._poll_error_count = 0
 
                 # Start auto-polling status every 2 seconds
                 self.startStatusPolling()
@@ -974,6 +1046,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             response = urllib2.urlopen(url, timeout=5)
             data = json.loads(response.read())
 
+            # Reset error counter on success
+            self._poll_error_count = 0
+
             if data.get('success'):
                 status = data.get('status', {})
                 running = status.get('running', False)
@@ -984,21 +1059,35 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
 
                 if running:
                     self._test_status_label.setText("Status: Running ({}%)".format(progress))
-                    self.log_test("[PROGRESS] {}%".format(progress))
+                    # Only log when progress actually changes
+                    if progress != self._last_logged_progress:
+                        self._last_logged_progress = progress
+                        self.log_test("[PROGRESS] {}%".format(progress))
                 else:
                     self._test_status_label.setText("Status: Completed")
                     self._progress_bar.setValue(100)
 
-                    excel_file = status.get('excel_file')
-                    if excel_file:
-                        self._excel_file_label.setText(excel_file)
-                        self.log_test("[OK] Test complete! Excel: {}".format(excel_file))
+                    # Only log completion once
+                    if not self._test_completed_logged:
+                        self._test_completed_logged = True
+                        excel_file = status.get('excel_file')
+                        if excel_file:
+                            self._excel_file_label.setText(excel_file)
+                            self.log_test("[OK] Test complete! Excel: {}".format(excel_file))
+                        else:
+                            self.log_test("[OK] Test complete!")
 
                     # Stop auto-polling when test completes
                     self.stopStatusPolling()
 
         except Exception as e:
-            self.log_test("[ERROR] Status check failed: {}".format(str(e)))
+            self._poll_error_count += 1
+            # Only log first error, then stop after 5 consecutive failures
+            if self._poll_error_count == 1:
+                self.log_test("[ERROR] Status check failed: {}".format(str(e)))
+            if self._poll_error_count >= 5:
+                self.log_test("[ERROR] API unreachable after 5 attempts, stopping auto-refresh")
+                self.stopStatusPolling()
 
     def startStatusPolling(self):
         """Start automatic status polling every 2 seconds"""
@@ -1065,6 +1154,31 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
 
         except:
             pass
+
+    def applyAPIConfig(self, event):
+        """Apply API host/port configuration from text fields"""
+        try:
+            new_host = self._api_host_field.getText().strip()
+            new_port = self._api_port_field.getText().strip()
+
+            if not new_host:
+                self.log_test("[ERROR] API host cannot be empty")
+                return
+            if not new_port:
+                self.log_test("[ERROR] API port cannot be empty")
+                return
+
+            self.api_host = new_host
+            self.api_port = new_port
+            self.log_test("[OK] API config updated: http://{}:{}".format(self.api_host, self.api_port))
+
+            # Reload data from new API endpoint
+            self.loadRolesFromAPI()
+            self.loadExclusionsFromAPI()
+            self.loadURLsFromAPI()
+
+        except Exception as e:
+            self.log_test("[ERROR] Apply config failed: {}".format(str(e)))
 
     # ========================================================================
     # METHODS: Context Menu
@@ -1142,6 +1256,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 # Populate the cookie field and switch tab on EDT
                 def updateUI():
                     self._role_cookie_field.setText(cookie_value)
+                    self._auth_type_combo.setSelectedItem("Cookie")
                     self._main_panel.setSelectedIndex(0)
                     self.log_role("[OK] Cookie extracted and populated ({} chars)".format(len(cookie_value)))
                     self.log_role("     Preview: {}...".format(cookie_value[:50] if len(cookie_value) > 50 else cookie_value))
@@ -1257,9 +1372,12 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             request_info = self._helpers.analyzeRequest(message)
             url = str(request_info.getUrl())
 
+            # Escape regex metacharacters in URL before using as pattern
+            escaped_url = re.escape(url)
+
             # Add URL to exclusions via API
             api_url = "http://{}:{}/api/exclusions/add".format(self.api_host, self.api_port)
-            data = {"pattern": url}
+            data = {"pattern": escaped_url}
             req = urllib2.Request(api_url)
             req.add_header('Content-Type', 'application/json')
             response = urllib2.urlopen(req, json.dumps(data), timeout=10)
@@ -1269,7 +1387,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 # Switch to Exclusions tab and reload on EDT
                 def updateUI():
                     self._main_panel.setSelectedIndex(1)
-                    self.log_exclusion("[OK] URL added to exclusions: {}".format(url))
+                    self.log_exclusion("[OK] URL added to exclusions (escaped): {}".format(url))
                     self.loadExclusionsFromAPI()
 
                 SwingUtilities.invokeLater(updateUI)

@@ -43,7 +43,8 @@ CORS(app)
 
 # Configuration
 BASE_DIR = Path(__file__).parent
-URLS_FILE = BASE_DIR / "urls.txt"
+URLS_FILE = BASE_DIR / "urls.json"
+URLS_FILE_TXT = BASE_DIR / "urls.txt"  # Legacy plain text format
 ROLES_FILE = BASE_DIR / "roles.json"
 EXCLUSIONS_FILE = BASE_DIR / "exclusions.json"
 RESULTS_DIR = BASE_DIR / "results"
@@ -53,7 +54,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 # Global state
 roles = []  # List of {name: str, cookie: str}
-urls = []   # List of URLs
+urls = []   # List of URL objects: {url: str, method: str, body: str, content_type: str}
 exclusion_patterns = []  # List of regex patterns to exclude
 test_status = {
     "running": False,
@@ -86,21 +87,42 @@ def save_roles():
         json.dump(roles, f, indent=2)
 
 
+def normalize_url_entry(entry):
+    """Normalize a URL entry to a standard dict format"""
+    if isinstance(entry, str):
+        return {'url': entry.strip(), 'method': 'GET', 'body': None, 'content_type': None}
+    return {
+        'url': entry.get('url', '').strip(),
+        'method': entry.get('method', 'GET').upper(),
+        'body': entry.get('body') or None,
+        'content_type': entry.get('content_type') or None,
+    }
+
+
+def url_entry_key(entry):
+    """Generate a unique key for dedup: 'METHOD url'"""
+    return f"{entry.get('method', 'GET').upper()} {entry.get('url', '')}"
+
+
 def load_urls():
-    """Load URLs from file"""
+    """Load URLs from file (JSON format, with legacy txt fallback)"""
     global urls
     if URLS_FILE.exists():
         with open(URLS_FILE, 'r', encoding='utf-8') as f:
-            urls = [line.strip() for line in f if line.strip()]
+            raw = json.load(f)
+            urls = [normalize_url_entry(e) for e in raw]
+    elif URLS_FILE_TXT.exists():
+        # Legacy: load from plain text urls.txt
+        with open(URLS_FILE_TXT, 'r', encoding='utf-8') as f:
+            urls = [normalize_url_entry(line.strip()) for line in f if line.strip()]
     else:
         urls = []
 
 
 def save_urls():
-    """Save URLs to file"""
+    """Save URLs to JSON file"""
     with open(URLS_FILE, 'w', encoding='utf-8') as f:
-        for url in urls:
-            f.write(url + '\n')
+        json.dump(urls, f, indent=2, ensure_ascii=False)
 
 
 def load_exclusions():
@@ -402,7 +424,7 @@ def clear_exclusions():
 
 @app.route('/api/urls/add', methods=['POST'])
 def add_urls():
-    """Add URLs to the list (excluding patterns are applied)"""
+    """Add URLs to the list (supports plain strings or URL objects with method/body)"""
     try:
         data = request.json
         new_urls = data.get('urls', [])
@@ -416,24 +438,33 @@ def add_urls():
         if not append:
             urls = []
 
+        # Build set of existing keys for fast dedup lookup
+        existing_keys = {url_entry_key(u) for u in urls}
+
         # Add new URLs (avoid duplicates and check exclusions)
         added = 0
         duplicates = 0
         excluded = 0
 
-        for url in new_urls:
-            url = url.strip()
-            if url:
-                # Check if URL matches exclusion pattern
-                if is_url_excluded(url):
-                    excluded += 1
-                    continue
+        for entry in new_urls:
+            normalized = normalize_url_entry(entry)
+            url_str = normalized['url']
 
-                if url not in urls:
-                    urls.append(url)
-                    added += 1
-                else:
-                    duplicates += 1
+            if not url_str:
+                continue
+
+            # Check if URL matches exclusion pattern
+            if is_url_excluded(url_str):
+                excluded += 1
+                continue
+
+            key = url_entry_key(normalized)
+            if key not in existing_keys:
+                urls.append(normalized)
+                existing_keys.add(key)
+                added += 1
+            else:
+                duplicates += 1
 
         save_urls()
 
@@ -478,27 +509,23 @@ def list_urls():
 
 @app.route('/api/urls/deduplicate', methods=['POST'])
 def deduplicate_urls():
-    """Deduplicate URLs (treat /path and /path/ as same)"""
+    """Deduplicate URLs (treat /path and /path/ as same, per method)"""
     try:
         global urls
 
-        # Normalize URLs by removing trailing slash
-        normalized = {}
-        for url in urls:
-            # Remove trailing slash for comparison
-            normalized_url = url.rstrip('/')
-            # Keep first occurrence
-            if normalized_url not in normalized:
-                normalized[normalized_url] = url
-
-        # Get unique URLs (prefer without trailing slash)
-        unique_urls = []
-        for norm_url, original_url in normalized.items():
-            # Use normalized version (without trailing slash)
-            unique_urls.append(norm_url)
+        # Deduplicate by normalized key (method + url without trailing slash)
+        seen = {}
+        for entry in urls:
+            norm_url = entry['url'].rstrip('/')
+            key = f"{entry['method']} {norm_url}"
+            if key not in seen:
+                # Store with normalized URL
+                deduped = dict(entry)
+                deduped['url'] = norm_url
+                seen[key] = deduped
 
         original_count = len(urls)
-        urls = unique_urls
+        urls = list(seen.values())
         save_urls()
 
         removed = original_count - len(urls)
@@ -673,7 +700,7 @@ if __name__ == '__main__':
     print("="*70)
     print("BAC Checker v2.0 API Server")
     print("="*70)
-    print(f"URLs file: {URLS_FILE}")
+    print(f"URLs file: {URLS_FILE} (legacy: {URLS_FILE_TXT})")
     print(f"Roles file: {ROLES_FILE}")
     print(f"Results directory: {RESULTS_DIR}")
     print(f"Loaded: {len(roles)} roles, {len(urls)} URLs")
