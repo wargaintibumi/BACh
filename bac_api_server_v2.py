@@ -163,12 +163,13 @@ def get_roles():
 
 @app.route('/api/roles/add', methods=['POST'])
 def add_role():
-    """Add a new role (supports cookie or Bearer token)"""
+    """Add a new role (supports cookie, Bearer token, or custom header)"""
     try:
         data = request.json
         role_name = data.get('name', '').strip()
-        auth_type = data.get('auth_type', 'cookie').strip().lower()  # 'cookie' or 'token'
+        auth_type = data.get('auth_type', 'cookie').strip().lower()  # 'cookie', 'token', or 'header'
         auth_value = data.get('auth_value', '').strip()
+        header_name = data.get('header_name', '').strip()
 
         # Backwards compatibility: if 'cookie' field exists, use it
         if not auth_value and data.get('cookie'):
@@ -181,8 +182,11 @@ def add_role():
         if not auth_value:
             return jsonify({"success": False, "error": "Authentication value is required"}), 400
 
-        if auth_type not in ['cookie', 'token']:
-            return jsonify({"success": False, "error": "Auth type must be 'cookie' or 'token'"}), 400
+        if auth_type not in ['cookie', 'token', 'header']:
+            return jsonify({"success": False, "error": "Auth type must be 'cookie', 'token', or 'header'"}), 400
+
+        if auth_type == 'header' and not header_name:
+            return jsonify({"success": False, "error": "Header name is required for custom header auth type"}), 400
 
         # Check if role already exists
         if any(r['name'] == role_name for r in roles):
@@ -193,6 +197,7 @@ def add_role():
             "name": role_name,
             "auth_type": auth_type,
             "auth_value": auth_value,
+            "header_name": header_name if auth_type == 'header' else "",
             # Backwards compatibility fields
             "cookie": auth_value if auth_type == 'cookie' else ""
         })
@@ -216,6 +221,7 @@ def update_role():
         role_name = data.get('name', '').strip()
         auth_type = data.get('auth_type', 'cookie').strip().lower()
         auth_value = data.get('auth_value', '').strip()
+        header_name = data.get('header_name', '').strip()
 
         # Backwards compatibility
         if not auth_value and data.get('cookie'):
@@ -225,14 +231,18 @@ def update_role():
         if not role_name:
             return jsonify({"success": False, "error": "Role name is required"}), 400
 
-        if auth_type not in ['cookie', 'token']:
-            return jsonify({"success": False, "error": "Auth type must be 'cookie' or 'token'"}), 400
+        if auth_type not in ['cookie', 'token', 'header']:
+            return jsonify({"success": False, "error": "Auth type must be 'cookie', 'token', or 'header'"}), 400
+
+        if auth_type == 'header' and not header_name:
+            return jsonify({"success": False, "error": "Header name is required for custom header auth type"}), 400
 
         # Find and update role
         for role in roles:
             if role['name'] == role_name:
                 role['auth_type'] = auth_type
                 role['auth_value'] = auth_value
+                role['header_name'] = header_name if auth_type == 'header' else ""
                 # Backwards compatibility
                 role['cookie'] = auth_value if auth_type == 'cookie' else ""
                 save_roles()

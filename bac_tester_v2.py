@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_value=None, timeout=10):
+def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_value=None, header_name=None, timeout=10):
     """
     Test a single URL with a specific role's authentication.
 
@@ -22,8 +22,9 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
         url: URL to test
         role_name: Name of the role being tested
         cookie: Cookie string for authentication (deprecated, use auth_value)
-        auth_type: Type of authentication ('cookie' or 'token')
-        auth_value: Authentication value (cookie string or Bearer token)
+        auth_type: Type of authentication ('cookie', 'token', or 'header')
+        auth_value: Authentication value (cookie string, Bearer token, or custom header value)
+        header_name: Custom header name (only used when auth_type='header')
         timeout: Request timeout in seconds
 
     Returns:
@@ -54,7 +55,9 @@ def test_url_with_role(url, role_name, cookie=None, auth_type='cookie', auth_val
         ]
 
         # Add authentication header based on type
-        if auth_type == 'token':
+        if auth_type == 'header' and header_name:
+            cmd.extend(['-H', f'{header_name}: {auth_value}'])
+        elif auth_type == 'token':
             cmd.extend(['-H', f'Authorization: Bearer {auth_value}'])
         else:  # cookie (default)
             cmd.extend(['-H', f'Cookie: {auth_value}'])
@@ -197,14 +200,16 @@ def test_all_urls_with_roles(urls, roles, progress_callback=None, stop_callback=
             print(f"[{current_test}/{total_tests}] Testing {url} as {role['name']}", end=' ', flush=True)
 
             # Test the URL with this role
-            # Support both old format (cookie) and new format (auth_type + auth_value)
+            # Support old format (cookie), new format (auth_type + auth_value), and custom header
             auth_type = role.get('auth_type', 'cookie')
             auth_value = role.get('auth_value', role.get('cookie', ''))
+            header_name = role.get('header_name', '')
             result = test_url_with_role(
                 url,
                 role['name'],
                 auth_type=auth_type,
                 auth_value=auth_value,
+                header_name=header_name,
                 timeout=10
             )
 

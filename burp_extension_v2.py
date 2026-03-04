@@ -69,9 +69,10 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             self.createUI()
             callbacks.addSuiteTab(self)
 
-            # Load roles and exclusions from API
+            # Load roles, exclusions, and URLs from API
             self.loadRolesFromAPI()
             self.loadExclusionsFromAPI()
+            self.loadURLsFromAPI()
 
             print("[INIT] BAC Checker v2.0 Extension Loaded")
             print("[INFO] API Server: http://{}:{}".format(self.api_host, self.api_port))
@@ -87,6 +88,15 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             # Tab 1: Role Management
             role_tab = self.createRoleManagementTab()
             self._main_panel.addTab("Role Management", role_tab)
+
+            # Auth type combo listener to toggle header name field
+            def onAuthTypeChanged(event):
+                selected = str(self._auth_type_combo.getSelectedItem())
+                self._header_name_field.setEnabled(selected == "Custom Header")
+                if selected != "Custom Header":
+                    self._header_name_field.setText("")
+
+            self._auth_type_combo.addActionListener(onAuthTypeChanged)
 
             # Tab 2: URL Exclusions
             exclusion_tab = self.createExclusionTab()
@@ -128,17 +138,25 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
         gbc.gridx = 0; gbc.gridy = 1
         form_panel.add(JLabel("Auth Type:"), gbc)
         gbc.gridx = 1
-        self._auth_type_combo = JComboBox(["Cookie", "Bearer Token"])
+        self._auth_type_combo = JComboBox(["Cookie", "Bearer Token", "Custom Header"])
         form_panel.add(self._auth_type_combo, gbc)
 
         gbc.gridx = 0; gbc.gridy = 2
-        self._auth_value_label = JLabel("Cookie:")
+        form_panel.add(JLabel("Header Name:"), gbc)
+        gbc.gridx = 1
+        self._header_name_field = JTextField(15)
+        self._header_name_field.setToolTipText("e.g. X-API-Key, Authorization, X-Session-Token")
+        self._header_name_field.setEnabled(False)
+        form_panel.add(self._header_name_field, gbc)
+
+        gbc.gridx = 0; gbc.gridy = 3
+        self._auth_value_label = JLabel("Value:")
         form_panel.add(self._auth_value_label, gbc)
         gbc.gridx = 1
         self._role_cookie_field = JTextField(30)
         form_panel.add(self._role_cookie_field, gbc)
 
-        gbc.gridx = 0; gbc.gridy = 3; gbc.gridwidth = 2
+        gbc.gridx = 0; gbc.gridy = 4; gbc.gridwidth = 2
         button_panel = JPanel(FlowLayout(FlowLayout.LEFT))
         add_role_btn = JButton("Add Role", actionPerformed=self.addRole)
         button_panel.add(add_role_btn)
@@ -155,12 +173,13 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
         panel.add(form_panel, BorderLayout.NORTH)
 
         # Center panel - Roles table
-        column_names = ["Role Name", "Auth Type", "Auth Value"]
+        column_names = ["Role Name", "Auth Type", "Header Name", "Auth Value"]
         self._roles_model = DefaultTableModel(column_names, 0)
         self._roles_table = JTable(self._roles_model)
-        self._roles_table.getColumnModel().getColumn(0).setPreferredWidth(150)
+        self._roles_table.getColumnModel().getColumn(0).setPreferredWidth(120)
         self._roles_table.getColumnModel().getColumn(1).setPreferredWidth(100)
-        self._roles_table.getColumnModel().getColumn(2).setPreferredWidth(350)
+        self._roles_table.getColumnModel().getColumn(2).setPreferredWidth(120)
+        self._roles_table.getColumnModel().getColumn(3).setPreferredWidth(300)
 
         scroll_pane = JScrollPane(self._roles_table)
         panel.add(scroll_pane, BorderLayout.CENTER)
@@ -235,28 +254,47 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
     def createURLCollectorTab(self):
         panel = JPanel(BorderLayout())
 
-        # Top panel - Controls
-        controls_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        # Top panel - Controls (two rows)
+        top_panel = JPanel(GridBagLayout())
+        gbc = GridBagConstraints()
+        gbc.insets = Insets(2, 3, 2, 3)
+        gbc.anchor = GridBagConstraints.WEST
 
+        # Row 1: Capture controls
+        gbc.gridx = 0; gbc.gridy = 0
         self._auto_capture_cb = JCheckBox("Auto-capture URLs", self.auto_capture)
-        controls_panel.add(self._auto_capture_cb)
+        top_panel.add(self._auto_capture_cb, gbc)
 
-        clear_urls_btn = JButton("Clear Table", actionPerformed=self.clearURLs)
-        controls_panel.add(clear_urls_btn)
-
-        clear_api_urls_btn = JButton("Delete from API", actionPerformed=self.clearURLsFromAPI)
-        controls_panel.add(clear_api_urls_btn)
-
+        gbc.gridx = 1
         send_urls_btn = JButton("Send to API", actionPerformed=self.sendURLsToAPI)
-        controls_panel.add(send_urls_btn)
+        top_panel.add(send_urls_btn, gbc)
 
+        gbc.gridx = 2
+        refresh_urls_btn = JButton("Refresh from API", actionPerformed=lambda e: self.loadURLsFromAPI())
+        top_panel.add(refresh_urls_btn, gbc)
+
+        gbc.gridx = 3
         deduplicate_urls_btn = JButton("Deduplicate URLs", actionPerformed=self.deduplicateURLs)
-        controls_panel.add(deduplicate_urls_btn)
+        top_panel.add(deduplicate_urls_btn, gbc)
 
-        self._url_stats_label = JLabel("URLs captured: 0")
-        controls_panel.add(self._url_stats_label)
+        # Row 2: Clear controls + stats
+        gbc.gridx = 0; gbc.gridy = 1
+        clear_table_btn = JButton("Clear Table", actionPerformed=self.clearLocalTable)
+        top_panel.add(clear_table_btn, gbc)
 
-        panel.add(controls_panel, BorderLayout.NORTH)
+        gbc.gridx = 1
+        clear_api_urls_btn = JButton("Clear API URLs", actionPerformed=self.clearURLsFromAPI)
+        top_panel.add(clear_api_urls_btn, gbc)
+
+        gbc.gridx = 2
+        self._url_stats_label = JLabel("Captured: 0")
+        top_panel.add(self._url_stats_label, gbc)
+
+        gbc.gridx = 3
+        self._api_url_stats_label = JLabel("API: 0")
+        top_panel.add(self._api_url_stats_label, gbc)
+
+        panel.add(top_panel, BorderLayout.NORTH)
 
         # Center panel - URL list
         column_names = ["#", "Method", "URL", "Status"]
@@ -370,7 +408,14 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             role_name = self._role_name_field.getText().strip()
             auth_value = self._role_cookie_field.getText().strip()
             auth_type_str = str(self._auth_type_combo.getSelectedItem())
-            auth_type = "token" if auth_type_str == "Bearer Token" else "cookie"
+            header_name = self._header_name_field.getText().strip()
+
+            if auth_type_str == "Custom Header":
+                auth_type = "header"
+            elif auth_type_str == "Bearer Token":
+                auth_type = "token"
+            else:
+                auth_type = "cookie"
 
             if not role_name:
                 self.log_role("[ERROR] Role name is required")
@@ -380,11 +425,16 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 self.log_role("[ERROR] Authentication value is required")
                 return
 
+            if auth_type == "header" and not header_name:
+                self.log_role("[ERROR] Header name is required for Custom Header type")
+                return
+
             url = "http://{}:{}/api/roles/add".format(self.api_host, self.api_port)
             data = {
                 "name": role_name,
                 "auth_type": auth_type,
-                "auth_value": auth_value
+                "auth_value": auth_value,
+                "header_name": header_name
             }
 
             req = urllib2.Request(url)
@@ -393,9 +443,13 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             result = json.loads(response.read())
 
             if result.get('success'):
-                self.log_role("[OK] Role '{}' added ({})".format(role_name, auth_type_str))
+                self.log_role("[OK] Role '{}' added ({}{})".format(
+                    role_name, auth_type_str,
+                    ": " + header_name if header_name else ""
+                ))
                 self._role_name_field.setText("")
                 self._role_cookie_field.setText("")
+                self._header_name_field.setText("")
                 self.loadRolesFromAPI()
             else:
                 self.log_role("[ERROR] {}".format(result.get('error')))
@@ -414,17 +468,29 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             role_name = str(self._roles_model.getValueAt(selected_row, 0))
             auth_value = self._role_cookie_field.getText().strip()
             auth_type_str = str(self._auth_type_combo.getSelectedItem())
-            auth_type = "token" if auth_type_str == "Bearer Token" else "cookie"
+            header_name = self._header_name_field.getText().strip()
+
+            if auth_type_str == "Custom Header":
+                auth_type = "header"
+            elif auth_type_str == "Bearer Token":
+                auth_type = "token"
+            else:
+                auth_type = "cookie"
 
             if not auth_value:
                 self.log_role("[ERROR] Authentication value is required")
+                return
+
+            if auth_type == "header" and not header_name:
+                self.log_role("[ERROR] Header name is required for Custom Header type")
                 return
 
             url = "http://{}:{}/api/roles/update".format(self.api_host, self.api_port)
             data = {
                 "name": role_name,
                 "auth_type": auth_type,
-                "auth_value": auth_value
+                "auth_value": auth_value,
+                "header_name": header_name
             }
 
             req = urllib2.Request(url)
@@ -532,9 +598,15 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 for role in self.roles:
                     auth_type = role.get('auth_type', 'cookie')
                     auth_value = role.get('auth_value', role.get('cookie', ''))
-                    auth_type_display = "Bearer Token" if auth_type == 'token' else "Cookie"
+                    header_name = role.get('header_name', '')
+                    if auth_type == 'header':
+                        auth_type_display = "Custom Header"
+                    elif auth_type == 'token':
+                        auth_type_display = "Bearer Token"
+                    else:
+                        auth_type_display = "Cookie"
                     auth_value_preview = auth_value[:50] + '...' if len(auth_value) > 50 else auth_value
-                    self._roles_model.addRow([role['name'], auth_type_display, auth_value_preview])
+                    self._roles_model.addRow([role['name'], auth_type_display, header_name, auth_value_preview])
 
                 # Update counts
                 self._roles_count_label.setText(str(len(self.roles)))
@@ -701,7 +773,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 pass
 
             self._url_model.addRow([str(row_num), method, url, status])
-            self._url_stats_label.setText("URLs captured: {}".format(len(self.captured_urls)))
+            self._url_stats_label.setText("Captured: {}".format(len(self.captured_urls)))
 
         except Exception as e:
             self.log_url("[ERROR] Error adding URL: {}".format(str(e)))
@@ -714,26 +786,16 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
         except Exception as e:
             pass
 
-    def clearURLs(self, event):
-        """Clear captured URLs from table and backend"""
+    def clearLocalTable(self, event):
+        """Clear captured URLs from table only (does NOT clear API)"""
         try:
-            # Clear UI table
             self.captured_urls.clear()
             self._url_model.setRowCount(0)
-            self._url_stats_label.setText("URLs captured: 0")
-
-            # Also clear backend storage
-            url = "http://{}:{}/api/urls/clear".format(self.api_host, self.api_port)
-            req = urllib2.Request(url)
-            req.get_method = lambda: 'POST'
-            urllib2.urlopen(req, "", timeout=10)
-
-            self._urls_count_label.setText("0")
-            self.updateTestCounts()
-            self.log_url("[OK] URLs cleared from table and backend storage")
+            self._url_stats_label.setText("Captured: 0")
+            self.log_url("[OK] Table cleared (API URLs unchanged)")
 
         except Exception as e:
-            self.log_url("[ERROR] Clear URLs failed: {}".format(str(e)))
+            self.log_url("[ERROR] Clear table failed: {}".format(str(e)))
 
     def clearURLsFromAPI(self, event):
         """Delete all URLs from API storage"""
@@ -757,6 +819,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
 
             if result.get('success'):
                 self.log_url("[OK] All URLs deleted from API storage")
+                self._api_url_stats_label.setText("API: 0")
                 self._urls_count_label.setText("0")
                 self.updateTestCounts()
             else:
@@ -783,7 +846,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             if result.get('success'):
                 added = result.get('added', 0)
                 total = result.get('total', 0)
-                self.log_url("[OK] Sent {} URLs to API (total: {})".format(added, total))
+                excluded = result.get('excluded', 0)
+                self.log_url("[OK] Sent {} URLs to API (total: {}, excluded: {})".format(added, total, excluded))
+                self._api_url_stats_label.setText("API: {}".format(total))
                 self._urls_count_label.setText(str(total))
                 self.updateTestCounts()
             else:
@@ -813,6 +878,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
                 self.log_url("     Removed: {} duplicates".format(removed))
 
                 # Update URL count display
+                self._api_url_stats_label.setText("API: {}".format(unique))
                 self._urls_count_label.setText(str(unique))
                 self.updateTestCounts()
             else:
@@ -820,6 +886,27 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
 
         except Exception as e:
             self.log_url("[ERROR] Deduplication failed: {}".format(str(e)))
+
+    def loadURLsFromAPI(self):
+        """Load URLs from API and update counts"""
+        try:
+            url = "http://{}:{}/api/urls/list".format(self.api_host, self.api_port)
+            response = urllib2.urlopen(url, timeout=5)
+            data = json.loads(response.read())
+
+            if data.get('success'):
+                api_urls = data.get('urls', [])
+                count = data.get('count', len(api_urls))
+
+                # Update API count labels
+                self._api_url_stats_label.setText("API: {}".format(count))
+                self._urls_count_label.setText(str(count))
+                self.updateTestCounts()
+
+                self.log_url("[OK] API has {} URLs".format(count))
+
+        except Exception as e:
+            self.log_url("[WARN] Could not load URLs from API: {}".format(str(e)))
 
     # ========================================================================
     # METHODS: Testing
@@ -1009,7 +1096,12 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
             token_menu_item.addActionListener(lambda x: self.extractBearerTokenFromMessage(invocation))
             menu_list.add(token_menu_item)
 
-            # Menu item 4: Add to Exclusions
+            # Menu item 4: Extract Custom Header
+            header_menu_item = JMenuItem("Extract Custom Header for BAC Checker v2.0")
+            header_menu_item.addActionListener(lambda x: self.extractCustomHeaderFromMessage(invocation))
+            menu_list.add(header_menu_item)
+
+            # Menu item 5: Add to Exclusions
             exclusion_menu_item = JMenuItem("Add to Exclusions (BAC Checker v2.0)")
             exclusion_menu_item.addActionListener(lambda x: self.addURLToExclusions(invocation))
             menu_list.add(exclusion_menu_item)
@@ -1099,6 +1191,58 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IHttpListener):
 
         except Exception as e:
             self.log_role("[ERROR] Error extracting Bearer token: {}".format(str(e)))
+
+    def extractCustomHeaderFromMessage(self, invocation):
+        """Prompt user for header name, extract it from request, and populate role management"""
+        try:
+            messages = invocation.getSelectedMessages()
+            if not messages or len(messages) == 0:
+                self.log_role("[ERROR] No message selected")
+                return
+
+            # Ask user which header to extract
+            header_name_input = JOptionPane.showInputDialog(
+                None,
+                "Enter the header name to extract\n(e.g. X-API-Key, X-Session-Token, Authorization):",
+                "Extract Custom Header",
+                JOptionPane.QUESTION_MESSAGE
+            )
+
+            if not header_name_input or not header_name_input.strip():
+                return
+
+            header_name_input = header_name_input.strip()
+
+            # Get first message
+            message = messages[0]
+            request_info = self._helpers.analyzeRequest(message)
+            headers = request_info.getHeaders()
+
+            # Find the requested header
+            header_value = None
+            for header in headers:
+                if header.lower().startswith(header_name_input.lower() + ":"):
+                    header_value = header[len(header_name_input) + 1:].strip()
+                    break
+
+            if header_value:
+                def updateUI():
+                    self._role_cookie_field.setText(header_value)
+                    self._header_name_field.setText(header_name_input)
+                    self._auth_type_combo.setSelectedItem("Custom Header")
+                    self._header_name_field.setEnabled(True)
+                    self._main_panel.setSelectedIndex(0)
+                    self.log_role("[OK] Header '{}' extracted and populated ({} chars)".format(
+                        header_name_input, len(header_value)))
+                    self.log_role("     Preview: {}...".format(
+                        header_value[:50] if len(header_value) > 50 else header_value))
+
+                SwingUtilities.invokeLater(updateUI)
+            else:
+                self.log_role("[ERROR] Header '{}' not found in request".format(header_name_input))
+
+        except Exception as e:
+            self.log_role("[ERROR] Error extracting custom header: {}".format(str(e)))
 
     def addURLToExclusions(self, invocation):
         """Extract URL from selected request and add to exclusion patterns"""
